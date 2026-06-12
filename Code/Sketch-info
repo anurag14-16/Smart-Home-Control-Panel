@@ -1,0 +1,230 @@
+#include <Keypad.h>
+#include <LiquidCrystal_I2C.h>
+#include <ESP32Servo.h>
+
+// ─── LCD ───────────────────────────────────────────────
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ─── SERVO ─────────────────────────────────────────────
+Servo doorServo;
+#define SERVO_PIN 18
+#define LOCKED_ANGLE   0
+#define UNLOCKED_ANGLE 90
+
+// ─── RELAYS ────────────────────────────────────────────
+#define RELAY_LIGHT 19
+#define RELAY_FAN   23
+
+// ─── STEPPER (A4988) ───────────────────────────────────
+#define STEP_PIN 16
+#define DIR_PIN  17
+
+// ─── BUZZER ────────────────────────────────────────────
+#define BUZZER_PIN 5
+
+// ─── KEYPAD ────────────────────────────────────────────
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+byte rowPins[ROWS] = {13, 12, 14, 27};
+byte colPins[COLS] = {26, 25, 33, 32};
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// ─── PASSWORD ──────────────────────────────────────────
+const String CORRECT_PASSWORD = "1234";
+String inputPassword = "";
+
+// ─── STATES ────────────────────────────────────────────
+// 0 = LOCKED (outside)
+// 1 = UNLOCKED (inside, door open)
+// 2 = INSIDE (door locked but inside)
+int systemState = 0;
+
+bool lightOn = false;
+bool fanOn   = false;
+
+// ───────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+
+  lcd.init();
+  lcd.backlight();
+
+  doorServo.attach(SERVO_PIN);
+  doorServo.write(LOCKED_ANGLE);
+
+  pinMode(RELAY_LIGHT, OUTPUT);
+  pinMode(RELAY_FAN,   OUTPUT);
+  digitalWrite(RELAY_LIGHT, LOW);
+  digitalWrite(RELAY_FAN,   LOW);
+
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN,  OUTPUT);
+  digitalWrite(DIR_PIN, HIGH);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  showBootScreen();
+}
+
+// ───────────────────────────────────────────────────────
+void loop() {
+  char key = keypad.getKey();
+  if (key) handleKey(key);
+
+  if (fanOn) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(3000);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(3000);
+  }
+}
+
+// ───────────────────────────────────────────────────────
+void handleKey(char key) {
+
+  if (systemState == 0) {
+    // ── OUTSIDE / LOCKED ──
+    if (key == '#') {
+      if (inputPassword == CORRECT_PASSWORD) {
+        grantAccess();
+      } else {
+        denyAccess();
+      }
+      inputPassword = "";
+
+    } else if (key == '*') {
+      inputPassword = "";
+      showEnterPassword();
+
+    } else if (isDigit(key)) {
+      inputPassword += key;
+      showPasswordInput();
+    }
+
+  } else if (systemState == 1 || systemState == 2) {
+    // ── UNLOCKED or INSIDE ──
+    if (key == 'A') {
+      lightOn = !lightOn;
+      digitalWrite(RELAY_LIGHT, lightOn ? HIGH : LOW);
+      showApplianceStatus();
+
+    } else if (key == 'B') {
+      fanOn = !fanOn;
+      digitalWrite(RELAY_FAN, fanOn ? HIGH : LOW);
+      showApplianceStatus();
+
+    } else if (key == 'C') {
+      // Lock door but stay inside — appliances remain
+      lockDoorInside();
+
+    } else if (key == 'D') {
+      // Full logout — leaving home
+      leaveHome();
+
+    } else if (key == '*') {
+      showApplianceStatus();
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────
+void grantAccess() {
+  systemState = 1;
+  doorServo.write(UNLOCKED_ANGLE);
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Access Granted");
+  lcd.setCursor(0, 1); lcd.print("Door Unlocked");
+  beep(1, 200);
+  delay(1500);
+  showApplianceStatus();
+}
+
+void denyAccess() {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Access Denied!");
+  lcd.setCursor(0, 1); lcd.print("Try Again");
+  beep(3, 150);
+  delay(1500);
+  showEnterPassword();
+}
+
+void lockDoorInside() {
+  // Lock door but keep appliance control
+  systemState = 2;
+  doorServo.write(LOCKED_ANGLE);
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Door Locked");
+  lcd.setCursor(0, 1); lcd.print("You're Inside");
+  beep(1, 200);
+  delay(1500);
+  showApplianceStatus();
+}
+
+void leaveHome() {
+  // Full logout
+  systemState = 0;
+  doorServo.write(LOCKED_ANGLE);
+  lightOn = false;
+  fanOn   = false;
+  digitalWrite(RELAY_LIGHT, LOW);
+  digitalWrite(RELAY_FAN,   LOW);
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Goodbye!");
+  lcd.setCursor(0, 1); lcd.print("Stay Safe");
+  beep(1, 300);
+  delay(1500);
+  showEnterPassword();
+}
+
+// ───────────────────────────────────────────────────────
+void showBootScreen() {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("  Smart Home  ");
+  lcd.setCursor(0, 1); lcd.print("Enter Password");
+}
+
+void showEnterPassword() {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Enter Password:");
+  lcd.setCursor(0, 1); lcd.print("                ");
+}
+
+void showPasswordInput() {
+  lcd.setCursor(0, 0); lcd.print("Enter Password:");
+  lcd.setCursor(0, 1);
+  String stars = "";
+  for (int i = 0; i < inputPassword.length(); i++) stars += "*";
+  lcd.print(stars + "                ");
+}
+
+void showApplianceStatus() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Lt:");
+  lcd.print(lightOn ? "ON " : "OFF");
+  lcd.print(" Fn:");
+  lcd.print(fanOn ? "ON " : "OFF");
+  lcd.setCursor(0, 1);
+  // Show different hint based on state
+  if (systemState == 1) {
+    lcd.print("A:Lt B:Fn C:Lock");
+  } else {
+      lcd.print("A:Lt B:Fn D:Exit");
+  }
+}
+
+void beep(int times, int duration) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(duration);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(100);
+  }
+}
